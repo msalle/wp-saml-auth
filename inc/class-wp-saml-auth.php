@@ -321,6 +321,46 @@ class WP_SAML_Auth {
 
 		$existing_user = get_user_by( $get_user_by, $attributes[ $attribute ][0] );
 		if ( $existing_user ) {
+			/* Get user's attributes. Only role will be overridden per site */
+			$user_args=array();
+			foreach ( array( 'display_name', 'user_login', 'user_email', 'first_name', 'last_name' ) as $type ) {
+				$attribute          = self::get_option( "{$type}_attribute" );
+				$user_args[ $type ] = ! empty( $attributes[ $attribute ][0] ) ? $attributes[ $attribute ][0] : '';
+			}
+
+			/* Get user's blogs */
+			$userblogids = wp_list_pluck(get_blogs_of_user($existing_user->ID,true), "userblog_id");
+
+			/* When autoprovision is set, enroll the user in all SAML-enabled sites */
+			if ( self::get_option( 'auto_provision' ) ) {
+				$plugin = "wp-saml-auth/wp-saml-auth.php";
+				if ( ! function_exists( 'is_plugin_active_for_network' ) ) {
+					require_once( ABSPATH . '/wp-admin/includes/plugin.php' );
+				}
+				$plugin_network_active = is_plugin_active_for_network( $plugin );
+				/* Loop over all sites */
+				foreach (get_sites() as $site)   {
+					/* Only check those for which $plugin is enabled */
+					if ( $plugin_network_active ||
+					     in_array( $plugin, (array) get_blog_option($site->blog_id, 'active_plugins', array()) ) )
+					{
+						/* Check whether user is already member */
+						if ( ! in_array($site->blog_id, $userblogids) ) {
+							/* Get default role */
+							$user_args['role'] = get_blog_option($site->blog_id, 'default_role');
+							$user_args = apply_filters( 'wp_saml_auth_insert_user', $user_args, $attributes );
+							/* Now add user */
+							error_log("Adding existing user ".$existing_user->user_login." to site ".$site->path." with role ".$user_args['role']);
+							if ( ! add_user_to_blog($site->blog_id, $existing_user->ID, $user_args['role']) ) {
+								return new WP_Error( 'wp_saml_add_user_failed', esc_html__( 'Could not add existing user '.$existing_user->ID.' to site '.$site->blog_id.'. Please contact your administrator.', 'wp-saml-auth' ) );
+							}
+						}
+					}
+				}
+			} elseif ( ! in_array( get_site()->blog_id, $userblogids ) ) {
+				return new WP_Error( 'wp_saml_auth_auto_provision_disabled', esc_html__( 'WordPress user needs adding to this site. Please contact your administrator.', 'wp-saml-auth' ) );
+			}
+
 			/**
 			 * Runs after a existing user has been authenticated in WordPress
 			 *
@@ -354,6 +394,36 @@ class WP_SAML_Auth {
 		}
 
 		$user = get_user_by( 'id', $user_id );
+
+		/* Log the new user */
+		error_log("Added new user ".$user->user_login." to current site ".get_site()->path." with role ".$user_args['role']);
+
+		/* Now also provision user in the other SAML-enabled sites */
+		$plugin = "wp-saml-auth/wp-saml-auth.php";
+		if ( ! function_exists( 'is_plugin_active_for_network' ) ) {
+			require_once( ABSPATH . '/wp-admin/includes/plugin.php' );
+		}
+		$plugin_network_active = is_plugin_active_for_network( $plugin );
+		/* Loop over all sites */
+		$current_siteid = get_site()->blog_id;
+		foreach (get_sites() as $site)   {
+			if ($site->blog_id == $current_siteid)
+				continue;
+
+			/* Only check those for which $plugin is enabled */
+			if ( $plugin_network_active ||
+			     in_array( $plugin, (array) get_blog_option($site->blog_id, 'active_plugins', array()) ) )
+			{
+				/* Get default role */
+				$user_args['role'] = get_blog_option($site->blog_id, 'default_role');
+				$user_args = apply_filters( 'wp_saml_auth_insert_user', $user_args, $attributes );
+				/* Now add user */
+				error_log("Adding new user ".$user->user_login." to site ".$site->path." with role ".$user_args['role']);
+				if ( ! add_user_to_blog($site->blog_id, $user_id, $user_args['role']) ) {
+					return new WP_Error( 'wp_saml_add_user_failed', esc_html__( 'Could not add new user '.$user_id.' to site '.$site->blog_id.'. Please contact your administrator.', 'wp-saml-auth' ) );
+				}
+			}
+		}
 
 		/**
 		 * Runs after the user has been authenticated in WordPress
